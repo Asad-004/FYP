@@ -2,24 +2,34 @@
 import os
 import httpx
 
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# FYP root directory
+BASE_DIR = Path(__file__).resolve().parents[1]
+
+# Load environment variables
+ENV_FILE = BASE_DIR / ".env"
+load_dotenv(ENV_FILE, override=True)
 
 
-
+print("ENV FILE:", ENV_FILE)
+print("ENV EXISTS:", ENV_FILE.exists())
+print("ACCOUNT ID:", repr(os.getenv("CLOUDFLARE_ACCOUNT_ID")))
+print("ACCOUNT ID LENGTH:", len(os.getenv("CLOUDFLARE_ACCOUNT_ID", "")))
 
 ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
 API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN")
 
 MODEL = os.getenv(
     "CLOUDFLARE_MODEL",
-    "@cf/meta/llama-3.1-8b-instruct"
+    "@cf/meta/infire-llama-3.1-8b-instruct"
 )
 
+# Standard Cloudflare Workers AI REST endpoint
 API_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
-    f"{ACCOUNT_ID}/ai/v1/chat/completions"
+    f"{ACCOUNT_ID}/ai/run/{MODEL}"
 )
 
 
@@ -29,7 +39,6 @@ async def generate_ai_response(system_prompt, user_prompt):
         raise RuntimeError("Cloudflare credentials missing")
 
     payload = {
-        "model": MODEL,
         "messages": [
             {
                 "role": "system",
@@ -40,7 +49,6 @@ async def generate_ai_response(system_prompt, user_prompt):
                 "content": user_prompt
             }
         ],
-        "temperature": 0.2,
         "max_tokens": 2000
     }
 
@@ -57,25 +65,34 @@ async def generate_ai_response(system_prompt, user_prompt):
             headers=headers
         )
 
-        response.raise_for_status()
+        if response.is_error:
+            raise RuntimeError(
+                f"Cloudflare HTTP {response.status_code}: "
+                f"{response.text[:1500]}"
+            )
 
         data = response.json()
 
         if not data.get("success"):
             raise RuntimeError(
-                f"Cloudflare error: {data.get('errors')}"
+                f"Cloudflare API error: {data.get('errors')}"
             )
 
-        choices = data.get("result", {}).get("choices", [])
+        result = data.get("result", {})
 
-        if not choices:
-            raise RuntimeError("AI returned no choices")
-
-        answer = choices[0].get(
-            "message", {}
-        ).get("content")
+        answer = result.get("response")
 
         if not answer:
-            raise RuntimeError("AI returned empty content")
+            # Support chat-completions-style response if returned
+            choices = result.get("choices", [])
+            if choices:
+                answer = (
+                    choices[0]
+                    .get("message", {})
+                    .get("content")
+                )
+
+        if not answer:
+            raise RuntimeError("Cloudflare returned empty AI response")
 
         return answer

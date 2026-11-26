@@ -1,13 +1,17 @@
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.vulnerability import VulnerabilityFinding
-from app.services.remediation import generate_remediation
+from schemas.vulnerability import VulnerabilityFinding
+from services.remediation import generate_remediation
 
 router = APIRouter(
     prefix="/api/ai",
     tags=["AI Remediation"]
 )
+
+logger = logging.getLogger(__name__)
 
 
 @router.post("/remediate")
@@ -16,7 +20,6 @@ async def remediate_vulnerability(
 ):
 
     try:
-
         result = await generate_remediation(finding)
 
         return {
@@ -26,9 +29,11 @@ async def remediate_vulnerability(
             "ai_remediation": result
         }
 
-    except Exception as e:
+    except Exception:
+        # Keep sensitive internal error details out of API responses
+        logger.exception("AI remediation request failed")
 
         raise HTTPException(
             status_code=502,
-            detail=f"AI remediation failed: {str(e)}"
+            detail="AI remediation service is temporarily unavailable."
         )
