@@ -11,7 +11,7 @@ export function formatEta(seconds) {
   return `~${mins}m ${rem}s`;
 }
 
-function getBaseApiUrl(apiEndpoint) {
+export function getBaseApiUrl(apiEndpoint) {
   const fallback = 'http://localhost:5000';
   if (!apiEndpoint) return fallback;
   return apiEndpoint.replace(/\/api\/scan\/?$/i, '') || fallback;
@@ -46,22 +46,16 @@ export function useScanManager({ config, onScanComplete }) {
     }
   }, []);
 
-  useEffect(() => {
-    return () => clearPolling();
-  }, [clearPolling]);
+  useEffect(() => () => clearPolling(), [clearPolling]);
 
   const finalizeScanOnce = useCallback((report, fallbackUrl, scanId) => {
     const key = scanId || `${report?.targetUrl || fallbackUrl}_${report?.scanTime || 'done'}`;
-    if (completedScanIdsRef.current.has(key)) {
-      return;
-    }
+    if (completedScanIdsRef.current.has(key)) return;
     completedScanIdsRef.current.add(key);
 
     if (report) {
       setScanResult(report);
-      if (onScanCompleteRef.current) {
-        onScanCompleteRef.current(report, fallbackUrl);
-      }
+      onScanCompleteRef.current?.(report, fallbackUrl);
     }
   }, []);
 
@@ -71,9 +65,7 @@ export function useScanManager({ config, onScanComplete }) {
 
       try {
         const res = await fetch(`${baseUrl}/api/scan/status/${scanId}`);
-        if (!res.ok) {
-          throw new Error(`Status check failed (${res.status})`);
-        }
+        if (!res.ok) throw new Error(`Status check failed (${res.status})`);
         const data = await res.json();
 
         setScanProgress({
@@ -88,11 +80,7 @@ export function useScanManager({ config, onScanComplete }) {
           activeScanIdRef.current = null;
           setLoading(false);
           setStopping(false);
-          setScanProgress((prev) => ({
-            ...prev,
-            progress: 100,
-            estimatedRemainingSec: 0,
-          }));
+          setScanProgress((prev) => ({ ...prev, progress: 100, estimatedRemainingSec: 0 }));
           finalizeScanOnce(data.report, scannedUrl, scanId);
           return;
         }
@@ -107,15 +95,11 @@ export function useScanManager({ config, onScanComplete }) {
         }
 
         if (activeScanIdRef.current === scanId) {
-          pollTimerRef.current = setTimeout(() => {
-            pollStatus(scanId, baseUrl, scannedUrl);
-          }, 1500);
+          pollTimerRef.current = setTimeout(() => pollStatus(scanId, baseUrl, scannedUrl), 1500);
         }
       } catch (err) {
         if (activeScanIdRef.current === scanId) {
-          pollTimerRef.current = setTimeout(() => {
-            pollStatus(scanId, baseUrl, scannedUrl);
-          }, 2000);
+          pollTimerRef.current = setTimeout(() => pollStatus(scanId, baseUrl, scannedUrl), 2000);
         }
         setErrorMsg(err.message || 'Polling connection issue.');
       }
@@ -150,19 +134,14 @@ export function useScanManager({ config, onScanComplete }) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: trimmed }),
         });
-
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.error || `Failed to start scan (${res.status})`);
         }
-
         const data = await res.json();
-        const newScanId = data.scanId;
-        activeScanIdRef.current = newScanId;
+        activeScanIdRef.current = data.scanId;
 
-        pollTimerRef.current = setTimeout(() => {
-          pollStatus(newScanId, baseUrl, trimmed);
-        }, 800);
+        pollTimerRef.current = setTimeout(() => pollStatus(data.scanId, baseUrl, trimmed), 800);
       } catch (err) {
         setLoading(false);
         setStopping(false);
@@ -187,9 +166,7 @@ export function useScanManager({ config, onScanComplete }) {
     const baseUrl = getBaseApiUrl(config?.apiEndpoint);
 
     try {
-      const res = await fetch(`${baseUrl}/api/scan/stop/${scanId}`, {
-        method: 'POST',
-      });
+      const res = await fetch(`${baseUrl}/api/scan/stop/${scanId}`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         if (data.report && (data.status === 'stopped' || data.status === 'completed')) {
@@ -197,12 +174,7 @@ export function useScanManager({ config, onScanComplete }) {
           activeScanIdRef.current = null;
           setLoading(false);
           setStopping(false);
-          setScanProgress((prev) => ({
-            ...prev,
-            phase: 'Stopped',
-            progress: 100,
-            estimatedRemainingSec: 0,
-          }));
+          setScanProgress((prev) => ({ ...prev, phase: 'Stopped', progress: 100, estimatedRemainingSec: 0 }));
           finalizeScanOnce(data.report, scannedUrl, scanId);
         }
       }
@@ -211,13 +183,5 @@ export function useScanManager({ config, onScanComplete }) {
     }
   }, [clearPolling, config?.apiEndpoint, finalizeScanOnce, stopping]);
 
-  return {
-    loading,
-    stopping,
-    scanProgress,
-    scanResult,
-    errorMsg,
-    startScan,
-    stopScan,
-  };
+  return { loading, stopping, scanProgress, scanResult, errorMsg, startScan, stopScan };
 }

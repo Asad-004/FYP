@@ -1,5 +1,7 @@
 import asyncio
 import os
+import shutil
+import subprocess
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -9,7 +11,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="ThreatLens Auditor API", version="1.0.0")
+from ai_service import analyze_full_report, analyze_vulnerability, get_cloudflare_status
+
+app = FastAPI(title="ThreatLens Auditor API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,47 +23,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ZAP_API_URL = os.getenv("ZAP_API_URL", "http://localhost:8080")
+ZAP_API_URL = os.getenv("ZAP_API_URL", "http://localhost:8080").rstrip("/")
 ZAP_API_KEY = os.getenv("ZAP_API_KEY", "7grqlfk0v13htee2vd2j231bvj")
-OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
+ZAP_DOCKER_CONTAINER = os.getenv("ZAP_DOCKER_CONTAINER", "zap-api")
 
 SCANS: Dict[str, Dict[str, Any]] = {}
 SCANS_LOCK = asyncio.Lock()
+AI_SEMAPHORE = asyncio.Semaphore(3)
 
 
 class ScanRequest(BaseModel):
     url: str = Field(..., min_length=1)
-    includeLlm: bool = Field(default=False)
-    include_llm: Optional[bool] = None
-
-    @property
-    def should_include_llm(self) -> bool:
-        return self.include_llm if self.include_llm is not None else self.includeLlm
 
 
-async def get_llm_remediation(vulnerability_name: str, description: str) -> str:
-    prompt = (
-        "Provide a concise, developer-ready remediation solution and code fix for the "
-        "following security vulnerability found by OWASP ZAP:\n"
-        f"Vulnerability: {vulnerability_name}\n"
-        f"Description: {description}\n"
-        "Keep it professional and concise (1-2 sentences max)."
-    )
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                OLLAMA_API_URL,
-                json={"model": "llama3", "prompt": prompt, "stream": False},
-            )
-            if response.status_code == 200:
-                return response.json().get(
-                    "response",
-                    "Apply standard secure coding controls and input validation.",
-                )
-    except Exception:
-        pass
-
-    return "Sanitize and validate all user inputs, and implement secure HTTP headers."
+class ReportAnalysisRequest(BaseModel):
+    report: Dict[str, Any]
 
 
 async def get_current_ascan_rule(client: httpx.AsyncClient, ascan_id: str) -> Optional[str]:
@@ -70,24 +48,25 @@ async def get_current_ascan_rule(client: httpx.AsyncClient, ascan_id: str) -> Op
             timeout=4.0,
         )
         if res.status_code == 200:
-            data = res.json()
-            progress_list = data.get("scanProgress", [])
-            if (
-                isinstance(progress_list, list)
-                and len(progress_list) > 1
-                and isinstance(progress_list[1], dict)
-            ):
+            progress_list = res.json().get("scanProgress", [])
+            if isinstance(progress_list, list) and len(progress_list) > 1 and isinstance(progress_list[1], dict):
                 for _host, host_entries in progress_list[1].items():
                     if isinstance(host_entries, list):
                         for item in host_entries:
-                            if (
-                                isinstance(item, dict)
-                                and str(item.get("status", "")).lower() == "in progress"
-                            ):
+                            if isinstance(item, dict) and str(item.get("status", "")).lower() == "in progress":
                                 return item.get("name") or "Active Rule Probe"
     except Exception:
         pass
     return None
+
+
+async def _safe_ai_analysis(alert: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async with AI_SEMAPHORE:
+        try:
+            return await analyze_vulnerability(alert)
+        except Exception as exc:
+            print(f"[AI] Skipped for '{alert.get('alert', 'Unknown')}': {exc}")
+            return None
 
 
 async def build_report(
@@ -95,10 +74,10 @@ async def build_report(
     target_url: str,
     start_time: float,
     stopped: bool = False,
-    include_llm: bool = False,
 ) -> Dict[str, Any]:
     vulnerabilities: List[Dict[str, Any]] = []
     risk_summary = {"high": 0, "medium": 0, "low": 0}
+    report_error: Optional[str] = None
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -106,39 +85,47 @@ async def build_report(
                 f"{ZAP_API_URL}/JSON/core/view/alerts/",
                 params={"apikey": ZAP_API_KEY, "baseurl": target_url},
             )
-            if zap_response.status_code == 200:
-                alerts = zap_response.json().get("alerts", [])
-                for idx, alert in enumerate(alerts[:15]):
-                    risk = alert.get("risk", "Medium")
-                    name = alert.get("alert", "Unknown Vulnerability")
-                    desc = alert.get("description", "No description provided.")
+            zap_response.raise_for_status()
+            alerts = zap_response.json().get("alerts", [])[:15]
+            ai_results = await asyncio.gather(*[_safe_ai_analysis(alert) for alert in alerts])
 
-                    risk_lower = risk.lower()
-                    if risk_lower == "high":
-                        risk_summary["high"] += 1
-                    elif risk_lower == "medium":
-                        risk_summary["medium"] += 1
-                    else:
-                        risk_summary["low"] += 1
+            for idx, (alert, ai_data) in enumerate(zip(alerts, ai_results)):
+                risk = alert.get("risk", "Medium")
+                name = alert.get("alert", "Unknown Vulnerability")
+                desc = alert.get("description", "No description provided.")
+                other_info = alert.get("other", "")
+                url = alert.get("url", "")
+                param = alert.get("param", "")
 
-                    item: Dict[str, Any] = {
+                risk_lower = risk.lower()
+                if risk_lower == "high":
+                    risk_summary["high"] += 1
+                elif risk_lower == "medium":
+                    risk_summary["medium"] += 1
+                else:
+                    risk_summary["low"] += 1
+
+                vulnerabilities.append(
+                    {
                         "id": idx + 1,
                         "name": name,
                         "risk": risk,
                         "confidence": alert.get("confidence", "Medium"),
                         "description": desc,
-                        "url": alert.get("url", ""),
-                        "param": alert.get("param", ""),
+                        "whyItOccurs": other_info or desc,
+                        "section": url or target_url,
+                        "url": url,
+                        "param": param,
+                        "lineNumber": None,
+                        "aiAnalysis": ai_data,
                     }
-                    if include_llm:
-                        item["llmSolution"] = await get_llm_remediation(name, desc)
-
-                    vulnerabilities.append(item)
-    except Exception as e:
-        print(f"[{scan_id}] Error fetching alerts: {e}")
+                )
+    except Exception as exc:
+        report_error = str(exc) or "Failed to fetch alerts from OWASP ZAP."
+        print(f"[{scan_id}] Error fetching alerts: {report_error}")
 
     elapsed_sec = round(time.time() - start_time, 1)
-    return {
+    report: Dict[str, Any] = {
         "scanId": scan_id,
         "targetUrl": target_url,
         "scanTime": f"{elapsed_sec}s",
@@ -146,33 +133,30 @@ async def build_report(
         "riskSummary": risk_summary,
         "vulnerabilities": vulnerabilities,
     }
+    if report_error:
+        report["error"] = report_error
+
+    try:
+        report["reportSolution"] = await analyze_full_report(report)
+    except Exception as exc:
+        report["reportSolutionError"] = str(exc)
+
+    return report
 
 
 async def stop_zap_processes(spider_id: Optional[str], ascan_id: Optional[str]) -> None:
     async with httpx.AsyncClient(timeout=5.0) as client:
-        if spider_id:
+        for endpoint, params in [
+            ("/JSON/spider/action/stop/", {"apikey": ZAP_API_KEY, "scanId": spider_id} if spider_id else None),
+            ("/JSON/ascan/action/stop/", {"apikey": ZAP_API_KEY, "scanId": ascan_id} if ascan_id else None),
+            ("/JSON/ascan/action/stopAllScans/", {"apikey": ZAP_API_KEY}),
+        ]:
+            if params is None:
+                continue
             try:
-                await client.get(
-                    f"{ZAP_API_URL}/JSON/spider/action/stop/",
-                    params={"apikey": ZAP_API_KEY, "scanId": spider_id},
-                )
+                await client.get(f"{ZAP_API_URL}{endpoint}", params=params)
             except Exception:
                 pass
-        if ascan_id:
-            try:
-                await client.get(
-                    f"{ZAP_API_URL}/JSON/ascan/action/stop/",
-                    params={"apikey": ZAP_API_KEY, "scanId": ascan_id},
-                )
-            except Exception:
-                pass
-        try:
-            await client.get(
-                f"{ZAP_API_URL}/JSON/ascan/action/stopAllScans/",
-                params={"apikey": ZAP_API_KEY},
-            )
-        except Exception:
-            pass
 
 
 async def _is_stop_requested(scan_id: str) -> bool:
@@ -187,20 +171,14 @@ async def _update_scan(scan_id: str, **fields: Any) -> None:
             SCANS[scan_id].update(fields)
 
 
-async def run_scan_worker(scan_id: str, target_url: str, include_llm: bool) -> None:
+async def run_scan_worker(scan_id: str, target_url: str) -> None:
     start_time = time.time()
     spider_id: Optional[str] = None
     ascan_id: Optional[str] = None
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # 1. Start ZAP Spider
-            await _update_scan(
-                scan_id,
-                phase="Spidering",
-                currentItem=f"Crawling {target_url}...",
-                progress=8,
-            )
+            await _update_scan(scan_id, phase="Spidering", currentItem=f"Crawling {target_url}...", progress=8)
             spider_res = await client.get(
                 f"{ZAP_API_URL}/JSON/spider/action/scan/",
                 params={"apikey": ZAP_API_KEY, "url": target_url},
@@ -212,7 +190,7 @@ async def run_scan_worker(scan_id: str, target_url: str, include_llm: bool) -> N
             while spider_id:
                 if await _is_stop_requested(scan_id):
                     await stop_zap_processes(spider_id, ascan_id)
-                    report = await build_report(scan_id, target_url, start_time, stopped=True, include_llm=include_llm)
+                    report = await build_report(scan_id, target_url, start_time, stopped=True)
                     await _update_scan(scan_id, status="stopped", phase="Stopped", progress=100, report=report)
                     return
 
@@ -221,19 +199,17 @@ async def run_scan_worker(scan_id: str, target_url: str, include_llm: bool) -> N
                     params={"apikey": ZAP_API_KEY, "scanId": spider_id},
                 )
                 spider_pct = int(st_res.json().get("status", 100))
-                mapped_pct = min(40, 8 + int(spider_pct * 0.32))
                 await _update_scan(
                     scan_id,
                     phase="Spidering",
                     currentItem=f"Spider progress: {spider_pct}%",
-                    progress=mapped_pct,
+                    progress=min(40, 8 + int(spider_pct * 0.32)),
                     estimatedRemainingSec=max(5, int((100 - spider_pct) * 0.4) + 60),
                 )
                 if spider_pct >= 100:
                     break
                 await asyncio.sleep(1.5)
 
-            # 2. Start ZAP Active Scan
             await _update_scan(
                 scan_id,
                 phase="Active Scanning",
@@ -251,7 +227,7 @@ async def run_scan_worker(scan_id: str, target_url: str, include_llm: bool) -> N
             while ascan_id:
                 if await _is_stop_requested(scan_id):
                     await stop_zap_processes(spider_id, ascan_id)
-                    report = await build_report(scan_id, target_url, start_time, stopped=True, include_llm=include_llm)
+                    report = await build_report(scan_id, target_url, start_time, stopped=True)
                     await _update_scan(scan_id, status="stopped", phase="Stopped", progress=100, report=report)
                     return
 
@@ -261,33 +237,25 @@ async def run_scan_worker(scan_id: str, target_url: str, include_llm: bool) -> N
                 )
                 ascan_pct = int(st_res.json().get("status", 100))
                 active_rule = await get_current_ascan_rule(client, ascan_id)
-                mapped_pct = min(92, 42 + int(ascan_pct * 0.50))
                 await _update_scan(
                     scan_id,
                     phase="Active Scanning",
                     currentItem=active_rule or f"Active scan progress: {ascan_pct}%",
-                    progress=mapped_pct,
+                    progress=min(92, 42 + int(ascan_pct * 0.50)),
                     estimatedRemainingSec=max(2, int((100 - ascan_pct) * 0.9)),
                 )
                 if ascan_pct >= 100:
                     break
                 await asyncio.sleep(1.5)
 
-        # 3. Build Report + Optional LLM Remediation
         await _update_scan(
             scan_id,
-            phase="Generating Report",
-            currentItem="Collecting alerts and generating remediation...",
+            phase="Generating Report & AI Solutions",
+            currentItem="Analyzing report with Cloudflare AI...",
             progress=95,
             estimatedRemainingSec=3,
         )
-        report = await build_report(
-            scan_id=scan_id,
-            target_url=target_url,
-            start_time=start_time,
-            stopped=False,
-            include_llm=include_llm,
-        )
+        report = await build_report(scan_id=scan_id, target_url=target_url, start_time=start_time, stopped=False)
         await _update_scan(
             scan_id,
             status="completed",
@@ -307,6 +275,153 @@ async def run_scan_worker(scan_id: str, target_url: str, include_llm: bool) -> N
             currentItem="Scan failed",
             error=str(exc) or "Failed to communicate with OWASP ZAP.",
         )
+
+
+def _check_docker_status() -> Dict[str, Any]:
+    cli_available = shutil.which("docker") is not None
+    if not cli_available:
+        return {
+            "cliAvailable": False,
+            "daemonRunning": False,
+            "containerName": ZAP_DOCKER_CONTAINER,
+            "containerRunning": False,
+            "containerStatus": "docker CLI not found",
+            "error": "Docker CLI is not installed or not in PATH.",
+        }
+
+    try:
+        info_proc = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        daemon_running = info_proc.returncode == 0
+        if not daemon_running:
+            return {
+                "cliAvailable": True,
+                "daemonRunning": False,
+                "containerName": ZAP_DOCKER_CONTAINER,
+                "containerRunning": False,
+                "containerStatus": "unavailable",
+                "error": (info_proc.stderr or info_proc.stdout or "Docker daemon is not reachable.").strip(),
+            }
+
+        ps_proc = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                f"name=^{ZAP_DOCKER_CONTAINER}$",
+                "--format",
+                "{{.State}}|{{.Status}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        raw_line = (ps_proc.stdout or "").strip().splitlines()
+        if not raw_line:
+            return {
+                "cliAvailable": True,
+                "daemonRunning": True,
+                "serverVersion": info_proc.stdout.strip(),
+                "containerName": ZAP_DOCKER_CONTAINER,
+                "containerRunning": False,
+                "containerStatus": "not found",
+                "error": f"Container '{ZAP_DOCKER_CONTAINER}' does not exist.",
+            }
+
+        state_part, _, status_part = raw_line[0].partition("|")
+        is_running = state_part.strip().lower() == "running"
+        return {
+            "cliAvailable": True,
+            "daemonRunning": True,
+            "serverVersion": info_proc.stdout.strip(),
+            "containerName": ZAP_DOCKER_CONTAINER,
+            "containerRunning": is_running,
+            "containerStatus": status_part.strip() or state_part.strip(),
+            "error": None if is_running else f"Container '{ZAP_DOCKER_CONTAINER}' state is '{state_part.strip()}'.",
+        }
+    except Exception as exc:
+        return {
+            "cliAvailable": True,
+            "daemonRunning": False,
+            "containerName": ZAP_DOCKER_CONTAINER,
+            "containerRunning": False,
+            "containerStatus": "check failed",
+            "error": str(exc),
+        }
+
+
+async def _check_zap_engine() -> Dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            res = await client.get(
+                f"{ZAP_API_URL}/JSON/core/view/version/",
+                params={"apikey": ZAP_API_KEY},
+            )
+            if res.status_code == 200:
+                version = res.json().get("version", "unknown")
+                return {
+                    "connected": True,
+                    "url": ZAP_API_URL,
+                    "version": version,
+                    "error": None,
+                }
+            return {
+                "connected": False,
+                "url": ZAP_API_URL,
+                "version": None,
+                "error": f"ZAP API returned HTTP {res.status_code} (check ZAP_API_KEY or port).",
+            }
+    except Exception as exc:
+        return {
+            "connected": False,
+            "url": ZAP_API_URL,
+            "version": None,
+            "error": str(exc) or f"Cannot reach OWASP ZAP at {ZAP_API_URL}",
+        }
+
+
+@app.get("/api/system/health")
+async def system_health():
+    zap_status, docker_status = await asyncio.gather(
+        _check_zap_engine(),
+        asyncio.to_thread(_check_docker_status),
+    )
+    cf_status = get_cloudflare_status()
+
+    config_errors: List[str] = []
+    if not ZAP_API_URL.startswith(("http://", "https://")):
+        config_errors.append("ZAP_API_URL must start with http:// or https://")
+    if not ZAP_API_KEY:
+        config_errors.append("ZAP_API_KEY is empty")
+    if cf_status["error"]:
+        config_errors.append(cf_status["error"])
+    if docker_status["error"]:
+        config_errors.append(f"Docker: {docker_status['error']}")
+    if zap_status["error"]:
+        config_errors.append(f"ZAP Engine: {zap_status['error']}")
+
+    return {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "zap": zap_status,
+        "docker": docker_status,
+        "cloudflare": cf_status,
+        "configErrors": config_errors,
+        "healthy": len(config_errors) == 0,
+    }
+
+
+@app.post("/api/report/analyze")
+async def analyze_report_endpoint(payload: ReportAnalysisRequest):
+    try:
+        solution = await analyze_full_report(payload.report)
+        return {"ok": True, "solution": solution}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc) or "Failed to generate AI report solution.")
 
 
 @app.post("/api/scan/start", status_code=202)
@@ -330,7 +445,7 @@ async def start_scan(payload: ScanRequest):
             "error": None,
         }
 
-    asyncio.create_task(run_scan_worker(scan_id, target_url, payload.should_include_llm))
+    asyncio.create_task(run_scan_worker(scan_id, target_url))
     return {"scanId": scan_id, "status": "running"}
 
 
@@ -379,13 +494,7 @@ async def legacy_scan_target(payload: ScanRequest):
     target_url = payload.url.strip()
     if not target_url:
         raise HTTPException(status_code=400, detail="URL is required")
-    return await build_report(
-        scan_id="sync",
-        target_url=target_url,
-        start_time=time.time(),
-        stopped=False,
-        include_llm=payload.should_include_llm,
-    )
+    return await build_report(scan_id="sync", target_url=target_url, start_time=time.time(), stopped=False)
 
 
 if __name__ == "__main__":

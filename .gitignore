@@ -1,5 +1,4 @@
-﻿# Dependencies & build artifacts
-node_modules/
+﻿node_modules/
 dist/
 build/
 __pycache__/
@@ -8,8 +7,6 @@ __pycache__/
 venv/
 .venv/
 env/
-
-# Environment & local secrets
 .env
 .env.local
 .env.*.local

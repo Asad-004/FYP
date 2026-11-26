@@ -8,60 +8,9 @@ import TopHeader from './components/TopHeader';
 import DashboardOverview from './components/DashboardOverview';
 import AdminDashboard from './components/AdminDashboard';
 import ScanHero from './components/ScanHero';
-import { useScanManager } from './hooks/useScanManager';
-
-const VULNERABILITY_TYPES = [
-  {
-    type: 'SQL Injection',
-    match: ['sql', 'sqli', 'database error', 'syntax error'],
-    summary:
-      'SQL Injection occurs when untrusted user input is concatenated directly into a database query without parameterization. It can allow attackers to read sensitive records, bypass authentication, or modify data.',
-  },
-  {
-    type: 'Cross-Site Scripting (XSS)',
-    match: ['xss', 'cross-site scripting', 'script injection'],
-    summary:
-      'Cross-Site Scripting happens when an application includes untrusted input in a web response without proper encoding or escaping. It allows malicious scripts to run in a user browser session.',
-  },
-  {
-    type: 'Cross-Site Request Forgery (CSRF)',
-    match: ['csrf', 'cross-site request forgery', 'anti-csrf'],
-    summary:
-      'Cross-Site Request Forgery tricks an authenticated user browser into sending unintended state-changing requests. Missing anti-CSRF tokens or weak cookie rules increase exposure.',
-  },
-  {
-    type: 'Security Headers & Transport',
-    match: ['header', 'csp', 'content security policy', 'ssl', 'tls', 'hsts', 'cookie', 'x-frame'],
-    summary:
-      'Missing or weak HTTP security headers and transport protections reduce browser-level defenses against framing, MIME sniffing, and traffic interception.',
-  },
-  {
-    type: 'Authentication & Session Management',
-    match: ['session', 'auth', 'login', 'token', 'password', 'credential'],
-    summary:
-      'Authentication and session flaws occur when credentials or session identifiers are weakly handled or improperly validated, risking unauthorized access or session hijacking.',
-  },
-  {
-    type: 'Information & Path Exposure',
-    match: ['disclosure', 'directory', 'listing', 'path traversal', 'debug', 'stack trace', 'version'],
-    summary:
-      'Information exposure occurs when internal paths, server versions, debug output, or sensitive files are unintentionally revealed externally.',
-  },
-];
-
-function getVulnerabilityTypeInfo(vuln) {
-  const combined = `${vuln?.name || ''} ${vuln?.type || ''} ${vuln?.description || ''}`.toLowerCase();
-  for (const entry of VULNERABILITY_TYPES) {
-    if (entry.match.some((kw) => combined.includes(kw))) {
-      return { type: entry.type, summary: entry.summary };
-    }
-  }
-  return {
-    type: vuln?.type || 'General Web Vulnerability',
-    summary:
-      'This finding indicates a security weakness or configuration gap on the target. Review the full details below to apply appropriate hardening.',
-  };
-}
+import VulnerabilityCard from './components/VulnerabilityCard';
+import { useScanManager, getBaseApiUrl } from './hooks/useScanManager';
+import { downloadVulnerabilitySolutionPdf } from './utils/exportReport';
 
 const DEFAULT_CONFIG = {
   apiEndpoint: 'http://localhost:5000/api/scan',
@@ -78,6 +27,9 @@ function WorkspaceApp({ onBackToHome }) {
   const [newScanModalOpen, setNewScanModalOpen] = useState(false);
   const [url, setUrl] = useState('');
   const [selectedReport, setSelectedReport] = useState(null);
+  const [reportSolution, setReportSolution] = useState(null);
+  const [generatingSolution, setGeneratingSolution] = useState(false);
+  const [solutionError, setSolutionError] = useState('');
 
   const userKey = (currentUser?.email || 'guest').trim().toLowerCase();
   const historyStorageKey = `threatlens_history_${userKey}`;
@@ -103,6 +55,7 @@ function WorkspaceApp({ onBackToHome }) {
 
   useEffect(() => {
     setSelectedReport(null);
+    setReportSolution(null);
     try {
       const savedConfig = localStorage.getItem(configStorageKey);
       setConfig(savedConfig ? { ...DEFAULT_CONFIG, ...JSON.parse(savedConfig) } : DEFAULT_CONFIG);
@@ -118,11 +71,8 @@ function WorkspaceApp({ onBackToHome }) {
   }, [configStorageKey, historyStorageKey]);
 
   useEffect(() => {
-    if (isAdmin && activePage !== 'admin') {
-      setActivePage('admin');
-    } else if (!isAdmin && activePage === 'admin') {
-      setActivePage('dashboard');
-    }
+    if (isAdmin && activePage !== 'admin') setActivePage('admin');
+    else if (!isAdmin && activePage === 'admin') setActivePage('dashboard');
   }, [isAdmin, activePage]);
 
   useEffect(() => {
@@ -133,35 +83,32 @@ function WorkspaceApp({ onBackToHome }) {
     localStorage.setItem(historyStorageKey, JSON.stringify(history));
   }, [historyStorageKey, history]);
 
-  const {
-    loading,
-    stopping,
-    scanProgress,
-    scanResult,
-    errorMsg,
-    startScan,
-    stopScan,
-  } = useScanManager({
-    config,
-    onScanComplete: (report, scannedUrl) => {
-      const entry = {
-        id: `scan_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        targetUrl: report?.targetUrl || scannedUrl,
-        scannedAt: new Date().toLocaleString(),
-        stopped: Boolean(report?.stopped),
-        riskSummary: report?.riskSummary || { high: 0, medium: 0, low: 0 },
-        vulnerabilities: report?.vulnerabilities || [],
-      };
-      if (config.saveHistory) {
-        setHistory((prev) => [entry, ...prev]);
-      }
-      setSelectedReport(entry);
-      recordLog(currentUser?.email || 'user', `Completed scan on ${entry.targetUrl}`);
-    },
-  });
+  const { loading, stopping, scanProgress, scanResult, errorMsg, startScan, stopScan } =
+    useScanManager({
+      config,
+      onScanComplete: (report, scannedUrl) => {
+        const entry = {
+          id: `scan_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          targetUrl: report?.targetUrl || scannedUrl,
+          scannedAt: new Date().toLocaleString(),
+          scanTime: report?.scanTime || '',
+          stopped: Boolean(report?.stopped),
+          riskSummary: report?.riskSummary || { high: 0, medium: 0, low: 0 },
+          vulnerabilities: report?.vulnerabilities || [],
+          reportSolution: report?.reportSolution || null,
+        };
+        if (config.saveHistory) {
+          setHistory((prev) => [entry, ...prev]);
+        }
+        setSelectedReport(entry);
+        setReportSolution(entry.reportSolution);
+        setSolutionError('');
+        recordLog(currentUser?.email || 'user', `Completed scan on ${entry.targetUrl}`);
+      },
+    });
 
   if (!currentUser) {
-    return <LoginPage onBackToHome={onBackToHome} />;
+    return <LoginPage />;
   }
 
   const handleNavigate = (page) => {
@@ -169,16 +116,13 @@ function WorkspaceApp({ onBackToHome }) {
       onBackToHome?.();
       return;
     }
-    if (isAdmin) {
-      setActivePage('admin');
-      return;
-    }
-    setActivePage(page);
+    setActivePage(isAdmin ? 'admin' : page);
   };
 
   const clearScanHistory = () => {
     setHistory([]);
     setSelectedReport(null);
+    setReportSolution(null);
     localStorage.removeItem(historyStorageKey);
   };
 
@@ -200,11 +144,39 @@ function WorkspaceApp({ onBackToHome }) {
       ? {
           targetUrl: scanResult.targetUrl,
           scannedAt: 'Just now',
+          scanTime: scanResult.scanTime || '',
           stopped: scanResult.stopped,
           riskSummary: scanResult.riskSummary || { high: 0, medium: 0, low: 0 },
           vulnerabilities: scanResult.vulnerabilities || [],
+          reportSolution: scanResult.reportSolution || null,
         }
       : null);
+
+  const activeSolution = reportSolution || activeReport?.reportSolution || null;
+
+  const handleGenerateReportSolution = async () => {
+    if (!activeReport) return;
+    setGeneratingSolution(true);
+    setSolutionError('');
+    try {
+      const baseUrl = getBaseApiUrl(config?.apiEndpoint);
+      const res = await fetch(`${baseUrl}/api/report/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ report: activeReport }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Failed (${res.status})`);
+      }
+      const data = await res.json();
+      setReportSolution(data.solution);
+    } catch (err) {
+      setSolutionError(err.message || 'Could not generate AI solutions.');
+    } finally {
+      setGeneratingSolution(false);
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -250,6 +222,7 @@ function WorkspaceApp({ onBackToHome }) {
                   onOpenNewScan={() => setNewScanModalOpen(true)}
                   onSelectScan={(scan) => {
                     setSelectedReport(scan);
+                    setReportSolution(scan.reportSolution || null);
                     setActivePage('findings');
                   }}
                   onNavigate={setActivePage}
@@ -321,11 +294,7 @@ function WorkspaceApp({ onBackToHome }) {
                     <h1 className="page-title">{activePage === 'reports' ? 'Reports' : 'Scans'}</h1>
                     <div className="header-actions">
                       {history.length > 0 && (
-                        <button
-                          type="button"
-                          className="btn-danger-sm"
-                          onClick={clearScanHistory}
-                        >
+                        <button type="button" className="btn-danger-sm" onClick={clearScanHistory}>
                           Clear History
                         </button>
                       )}
@@ -351,7 +320,7 @@ function WorkspaceApp({ onBackToHome }) {
                             <th>Timestamp</th>
                             <th>High</th>
                             <th>Medium</th>
-                            <th>Report</th>
+                            <th>Actions</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -361,16 +330,26 @@ function WorkspaceApp({ onBackToHome }) {
                               <td className="muted-cell">{item.scannedAt}</td>
                               <td className="num-high">{item.riskSummary?.high || 0}</td>
                               <td className="num-med">{item.riskSummary?.medium || 0}</td>
-                              <td>
+                              <td className="action-cell">
                                 <button
                                   type="button"
                                   className="btn-action-cyan"
                                   onClick={() => {
                                     setSelectedReport(item);
+                                    setReportSolution(item.reportSolution || null);
                                     setActivePage('findings');
                                   }}
                                 >
-                                  Open Findings
+                                  Open
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-table-view"
+                                  onClick={() =>
+                                    downloadVulnerabilitySolutionPdf(item, item.reportSolution || null)
+                                  }
+                                >
+                                  PDF Report
                                 </button>
                               </td>
                             </tr>
@@ -385,12 +364,25 @@ function WorkspaceApp({ onBackToHome }) {
               {activePage === 'findings' && (
                 <div className="page-container">
                   <div className="page-header-row">
-                    <h1 className="page-title">Vulnerability Findings</h1>
+                    <h1 className="page-title">Vulnerabilities &amp; Cloudflare AI Solutions</h1>
+                    {activeReport && (
+                      <div className="header-actions">
+                        <button
+                          type="button"
+                          className="btn-cyan-primary"
+                          onClick={() =>
+                            downloadVulnerabilitySolutionPdf(activeReport, activeSolution)
+                          }
+                        >
+                          Vulnerability &amp; Solution PDF
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {!activeReport ? (
                     <div className="tl-card empty-panel compact">
-                      <p>Select a completed scan or start a new scan to inspect findings.</p>
+                      <p>Select a scan or start a new scan to view vulnerabilities and AI solutions.</p>
                       <button
                         type="button"
                         className="btn-cyan-primary"
@@ -404,7 +396,7 @@ function WorkspaceApp({ onBackToHome }) {
                       <div className="tl-card report-banner">
                         <div>
                           <span className="status-pill completed">
-                            {activeReport.stopped ? 'Partial Report (Stopped)' : 'Scan Completed'}
+                            {activeReport.stopped ? 'Partial Report' : 'Completed'}
                           </span>
                           <h2 className="report-target">{activeReport.targetUrl}</h2>
                         </div>
@@ -415,33 +407,77 @@ function WorkspaceApp({ onBackToHome }) {
                           <span className="sev-badge medium">
                             Medium: {activeReport.riskSummary?.medium || 0}
                           </span>
+                          <span className="sev-badge low">
+                            Low: {activeReport.riskSummary?.low || 0}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-cyan-primary"
+                            onClick={handleGenerateReportSolution}
+                            disabled={generatingSolution}
+                          >
+                            {generatingSolution ? 'Generating...' : 'Cloudflare AI Solutions'}
+                          </button>
                         </div>
+                      </div>
+
+                      {solutionError && <div className="global-error-banner">{solutionError}</div>}
+
+                      {Array.isArray(activeSolution?.errorSolutions) &&
+                        activeSolution.errorSolutions.length > 0 && (
+                          <div className="tl-card">
+                            <h3 className="card-section-title">Cloudflare AI Solutions</h3>
+                            {activeSolution.errorSolutions.map((sol, idx) => (
+                              <div key={idx} className="solution-item-card">
+                                <div className="finding-header">
+                                  <h4 className="finding-title">
+                                    {idx + 1}. {sol.errorName || 'Vulnerability'}
+                                  </h4>
+                                  <span className={`severity-badge ${(sol.risk || 'low').toLowerCase()}`}>
+                                    {sol.risk || 'Info'}
+                                  </span>
+                                </div>
+
+                                {sol.solutionSummary && (
+                                  <p className="meta-line">{sol.solutionSummary}</p>
+                                )}
+
+                                {Array.isArray(sol.steps) && sol.steps.length > 0 && (
+                                  <ul className="ai-list">
+                                    {sol.steps.map((st, sIdx) => (
+                                      <li key={sIdx}>{st}</li>
+                                    ))}
+                                  </ul>
+                                )}
+
+                                {sol.codeExample && (
+                                  <pre className="evidence-block">
+                                    <code>
+                                      {typeof sol.codeExample === 'string'
+                                        ? sol.codeExample
+                                        : JSON.stringify(sol.codeExample, null, 2)}
+                                    </code>
+                                  </pre>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                      <div className="tl-card">
+                        <h3 className="card-section-title">
+                          Vulnerabilities Found ({activeReport.vulnerabilities.length})
+                        </h3>
                       </div>
 
                       {activeReport.vulnerabilities.length === 0 ? (
                         <div className="tl-card">
-                          <p>No vulnerabilities were reported for this scan.</p>
+                          <p>No vulnerabilities found.</p>
                         </div>
                       ) : (
-                        activeReport.vulnerabilities.map((vuln, idx) => {
-                          const typeInfo = getVulnerabilityTypeInfo(vuln);
-                          return (
-                            <div key={vuln.id || idx} className="tl-card finding-detail-card">
-                              <div className="finding-header">
-                                <span className="sev-badge high">{vuln.risk || 'Info'} Risk</span>
-                                <span className="vuln-category-pill">{typeInfo.type}</span>
-                                <h3>{vuln.name}</h3>
-                              </div>
-                              <div className="vuln-type-summary">
-                                <strong>About {typeInfo.type}:</strong> {typeInfo.summary}
-                              </div>
-                              <div className="vuln-raw-detail">
-                                <strong>Complete Finding Details:</strong>
-                                <p>{vuln.description}</p>
-                              </div>
-                            </div>
-                          );
-                        })
+                        activeReport.vulnerabilities.map((vuln, idx) => (
+                          <VulnerabilityCard key={vuln.id ?? idx} vuln={vuln} />
+                        ))
                       )}
                     </div>
                   )}
@@ -493,9 +529,11 @@ function WorkspaceApp({ onBackToHome }) {
                   <div className="tl-card">
                     <h3>How to Run a Scan</h3>
                     <p className="muted-caption">
-                      1. Click <strong>New scan</strong> in the sidebar.<br />
-                      2. Enter a target URL and start the scan.<br />
-                      3. View progress on the Dashboard and review results in Findings.
+                      1. Click <strong>New scan</strong> in the sidebar.
+                      <br />
+                      2. Enter a target URL and start the scan.
+                      <br />
+                      3. View vulnerabilities found, Cloudflare AI solutions, and export the Vulnerability &amp; Solution PDF.
                     </p>
                   </div>
                 </div>

@@ -56,7 +56,7 @@ export function AuthProvider({ children }) {
         : [
             {
               id: 'log_1',
-              timestamp: '2026-11-25 18:10',
+              timestamp: '2026-11-26 18:10',
               actor: 'admin@threatlens.io',
               action: 'Workspace initialized with role-based access control',
             },
@@ -96,12 +96,8 @@ export function AuthProvider({ children }) {
     const found = users.find(
       (u) => u.email.toLowerCase() === email.trim().toLowerCase() && u.password === password
     );
-    if (!found) {
-      return { ok: false, error: 'Invalid email or password.' };
-    }
-    if (found.status !== 'active') {
-      return { ok: false, error: 'This account is suspended. Contact an administrator.' };
-    }
+    if (!found) return { ok: false, error: 'Invalid email or password.' };
+    if (found.status !== 'active') return { ok: false, error: 'This account is suspended.' };
     const updated = { ...found, lastActive: 'Just now' };
     setUsers((prev) => prev.map((u) => (u.id === found.id ? updated : u)));
     setCurrentUser(updated);
@@ -109,15 +105,20 @@ export function AuthProvider({ children }) {
     return { ok: true, user: updated };
   };
 
-  const register = ({ name, email, password }) => {
-    if (users.some((u) => u.email.toLowerCase() === email.trim().toLowerCase())) {
+  const register = (nameOrObj, maybeEmail, maybePassword) => {
+    const payload =
+      typeof nameOrObj === 'object'
+        ? nameOrObj
+        : { name: nameOrObj, email: maybeEmail, password: maybePassword };
+
+    if (users.some((u) => u.email.toLowerCase() === (payload.email || '').trim().toLowerCase())) {
       return { ok: false, error: 'An account with this email already exists.' };
     }
     const newUser = {
       id: `usr_${Date.now()}`,
-      name: name.trim(),
-      email: email.trim().toLowerCase(),
-      password,
+      name: (payload.name || '').trim(),
+      email: (payload.email || '').trim().toLowerCase(),
+      password: payload.password,
       role: 'user',
       status: 'active',
       workspace: 'My Workspace',
@@ -132,9 +133,7 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
-    if (currentUser) {
-      recordLog(currentUser.email, 'Signed out');
-    }
+    if (currentUser) recordLog(currentUser.email, 'Signed out');
     setCurrentUser(null);
   };
 
