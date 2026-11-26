@@ -19,8 +19,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ZAP_API_URL = os.getenv("ZAP_API_URL", "http://localhost:8080")
-ZAP_API_KEY = os.getenv("ZAP_API_KEY", "7grqlfk0v13htee2vd2j231bvj")
+ZAP_API_URL = os.getenv("ZAP_API_URL", "http://localhost:8081")
+ZAP_API_KEY = os.getenv("ZAP_API_KEY", "threatlens123")
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
 
 SCANS: Dict[str, Dict[str, Any]] = {}

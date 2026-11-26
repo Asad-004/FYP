@@ -8,14 +8,38 @@ import requests
 app = Flask(__name__)
 CORS(app)
 
-ZAP_API_URL = "http://localhost:8080"
-ZAP_API_KEY = "7grqlfk0v13htee2vd2j231bvj"
+ZAP_API_URL = "http://127.0.0.1:8081"
+ZAP_API_KEY = "threatlens123"
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
 
 SCANS = {}
 SCANS_LOCK = threading.Lock()
 
+@app.route("/api/zap/health", methods=["GET"])
+def zap_health():
+    try:
+        response = requests.get(
+            f"{ZAP_API_URL}/JSON/core/view/version/",
+            params={"apikey": ZAP_API_KEY},
+            timeout=10
+        )
 
+        response.raise_for_status()
+        data = response.json()
+
+        return jsonify({
+            "status": "connected",
+            "zap_version": data.get("version")
+        })
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({
+            "status": "disconnected",
+            "error": str(e)
+        }), 500
+
+
+    
 def get_llm_remediation(vulnerability_name, description):
     prompt = (
         f"Provide a concise, developer-ready remediation solution and code fix for the following security vulnerability found by OWASP ZAP:\n"
