@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import LandingHome from './components/LandingHome';
 import LoginPage from './components/LoginPage';
 import Sidebar from './components/Sidebar';
 import TopHeader from './components/TopHeader';
@@ -68,7 +69,7 @@ const DEFAULT_CONFIG = {
   saveHistory: true,
 };
 
-function WorkspaceApp() {
+function WorkspaceApp({ onBackToHome }) {
   const { currentUser, recordLog } = useAuth();
   const isAdmin = currentUser?.role === 'admin';
   const [activePage, setActivePage] = useState(() => (isAdmin ? 'admin' : 'dashboard'));
@@ -160,10 +161,14 @@ function WorkspaceApp() {
   });
 
   if (!currentUser) {
-    return <LoginPage />;
+    return <LoginPage onBackToHome={onBackToHome} />;
   }
 
   const handleNavigate = (page) => {
+    if (page === 'home') {
+      onBackToHome?.();
+      return;
+    }
     if (isAdmin) {
       setActivePage('admin');
       return;
@@ -523,9 +528,15 @@ function WorkspaceApp() {
 }
 
 export default function App() {
+  const [showHome, setShowHome] = useState(true);
+
   return (
     <AuthProvider>
-      <WorkspaceApp />
+      {showHome ? (
+        <LandingHome onEnterApp={() => setShowHome(false)} />
+      ) : (
+        <WorkspaceApp onBackToHome={() => setShowHome(true)} />
+      )}
     </AuthProvider>
   );
 }
