@@ -8,9 +8,10 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from routers.ai_routes import router as ai_router
 
 app = FastAPI(title="ThreatLens Auditor API", version="1.0.0")
-
+app.include_router(ai_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
