@@ -1,0 +1,16 @@
+﻿# Dependencies & build artifacts
+node_modules/
+dist/
+build/
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+env/
+
+# Environment & local secrets
+.env
+.env.local
+.env.*.local
+*.log
