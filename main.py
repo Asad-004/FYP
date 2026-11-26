@@ -19,6 +19,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from ai_service import analyze_vulnerability
+
+
+
+class FindingRequest(BaseModel):
+    findings: List[dict]
+
+
+@app.post("/api/ai/analyze")
+async def analyze_findings(request: FindingRequest):
+
+    if not request.findings:
+        raise HTTPException(
+            status_code=400,
+            detail="No vulnerability findings provided"
+        )
+
+    if len(request.findings) > 20:
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum 20 findings per request"
+        )
+
+    results = []
+
+    for finding in request.findings:
+
+        try:
+            analysis = await analyze_vulnerability(finding)
+
+            results.append({
+                "original_finding": finding,
+                "ai_analysis": analysis,
+                "status": "success"
+            })
+
+        except Exception as error:
+
+            results.append({
+                "original_finding": finding,
+                "ai_analysis": None,
+                "status": "failed",
+                "error": str(error)
+            })
+
+    return {
+        "success": True,
+        "total": len(results),
+        "analyzed": sum(
+            1 for r in results if r["status"] == "success"
+        ),
+        "results": results
+    }
+
+
 ZAP_API_URL = os.getenv("ZAP_API_URL", "http://localhost:8081")
 ZAP_API_KEY = os.getenv("ZAP_API_KEY", "threatlens123")
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
