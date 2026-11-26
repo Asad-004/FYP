@@ -1,6 +1,200 @@
 import React, { useState } from 'react';
 import ScanProgressCard from './ScanProgressCard';
 
+function VulnerabilityLineGraph({ history, totals, totalFindings, onInspect }) {
+  const [hoveredPoint, setHoveredPoint] = useState(null);
+
+  const seriesConfig = [
+    { key: 'high', label: 'High', color: '#dc2626' },
+    { key: 'medium', label: 'Medium', color: '#d97706' },
+    { key: 'low', label: 'Low / Info', color: '#2563eb' },
+  ];
+
+  // Chronological order (oldest -> newest) for trend lines; duplicate single point if only 1 scan exists
+  const orderedScans = [...history].reverse();
+  const pointsSource =
+    orderedScans.length >= 2
+      ? orderedScans.slice(-8)
+      : orderedScans.length === 1
+      ? [
+          { ...orderedScans[0], _label: 'Start', _zeroBaseline: true },
+          { ...orderedScans[0], _label: orderedScans[0].scannedAt || 'Latest' },
+        ]
+      : [
+          { _label: 'Run 1', riskSummary: { high: 0, medium: 0, low: 0 } },
+          { _label: 'Run 2', riskSummary: totals },
+        ];
+
+  const allValues = pointsSource.flatMap((scan) =>
+    scan._zeroBaseline
+      ? [0]
+      : [
+          scan.riskSummary?.high || 0,
+          scan.riskSummary?.medium || 0,
+          scan.riskSummary?.low || 0,
+        ]
+  );
+  const maxY = Math.max(1, ...allValues);
+
+  const svgWidth = 620;
+  const svgHeight = 152;
+  const padLeft = 34;
+  const padRight = 18;
+  const padTop = 14;
+  const padBottom = 26;
+  const plotW = svgWidth - padLeft - padRight;
+  const plotH = svgHeight - padTop - padBottom;
+
+  const getX = (index) => {
+    if (pointsSource.length <= 1) return padLeft + plotW / 2;
+    return padLeft + (index / (pointsSource.length - 1)) * plotW;
+  };
+
+  const getY = (val) => {
+    return padTop + plotH - (val / maxY) * plotH;
+  };
+
+  const yTicks = [0, 0.5, 1].map((ratio) => Math.round(maxY * ratio));
+
+  return (
+    <div className="vuln-line-wrap">
+      <div className="vuln-line-toolbar">
+        <div className="vuln-legend">
+          {seriesConfig.map((s) => (
+            <span key={s.key} className="vuln-legend-item">
+              <span
+                className="vuln-legend-dot"
+                style={{ backgroundColor: s.color }}
+              />
+              {s.label}: <strong>{totals[s.key] || 0}</strong>
+            </span>
+          ))}
+        </div>
+
+        <span className="vuln-line-status">
+          {hoveredPoint
+            ? `${hoveredPoint.seriesLabel} — ${hoveredPoint.value} (${hoveredPoint.scanLabel})`
+            : `Total: ${totalFindings} across ${history.length} scan${
+                history.length === 1 ? '' : 's'
+              }`}
+        </span>
+      </div>
+
+      <svg
+        className="vuln-line-svg"
+        viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+        role="img"
+        aria-label="Vulnerability severity line graph"
+      >
+        {/* Horizontal gridlines & Y-axis labels */}
+        {yTicks.map((tickVal, idx) => {
+          const y = getY(tickVal);
+          return (
+            <g key={idx}>
+              <line
+                x1={padLeft}
+                y1={y}
+                x2={svgWidth - padRight}
+                y2={y}
+                stroke="#e5e7eb"
+                strokeWidth="1"
+                strokeDasharray={tickVal === 0 ? undefined : '3 3'}
+              />
+              <text
+                x={padLeft - 8}
+                y={y + 3.5}
+                textAnchor="end"
+                fontSize="10"
+                fill="#6b7280"
+              >
+                {tickVal}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* X-axis labels */}
+        {pointsSource.map((scan, idx) => {
+          const x = getX(idx);
+          const rawLabel =
+            scan._label || scan.targetUrl?.replace(/^https?:\/\//, '') || `#${idx + 1}`;
+          const shortLabel =
+            rawLabel.length > 14 ? `${rawLabel.slice(0, 13)}…` : rawLabel;
+
+          return (
+            <text
+              key={idx}
+              x={x}
+              y={svgHeight - 6}
+              textAnchor="middle"
+              fontSize="10"
+              fill="#6b7280"
+            >
+              {shortLabel}
+            </text>
+          );
+        })}
+
+        {/* Series polylines & data points */}
+        {seriesConfig.map((series) => {
+          const coords = pointsSource.map((scan, idx) => {
+            const val = scan._zeroBaseline ? 0 : scan.riskSummary?.[series.key] || 0;
+            return {
+              x: getX(idx),
+              y: getY(val),
+              value: val,
+              scanLabel: scan.targetUrl || scan._label || `Scan ${idx + 1}`,
+            };
+          });
+
+          const polylinePoints = coords.map((p) => `${p.x},${p.y}`).join(' ');
+
+          return (
+            <g key={series.key}>
+              <polyline
+                fill="none"
+                stroke={series.color}
+                strokeWidth="2.25"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                points={polylinePoints}
+              />
+
+              {coords.map((pt, idx) => {
+                const isHovered =
+                  hoveredPoint?.seriesKey === series.key && hoveredPoint?.index === idx;
+                return (
+                  <circle
+                    key={idx}
+                    cx={pt.x}
+                    cy={pt.y}
+                    r={isHovered ? 5 : 3.5}
+                    fill="#ffffff"
+                    stroke={series.color}
+                    strokeWidth="2"
+                    style={{ cursor: 'pointer' }}
+                    onMouseEnter={() =>
+                      setHoveredPoint({
+                        seriesKey: series.key,
+                        seriesLabel: series.label,
+                        index: idx,
+                        value: pt.value,
+                        scanLabel: pt.scanLabel,
+                      })
+                    }
+                    onMouseLeave={() => setHoveredPoint(null)}
+                    onClick={onInspect}
+                  />
+                );
+              })}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 export default function DashboardOverview({
   history,
   loading,
@@ -98,38 +292,12 @@ export default function DashboardOverview({
                   </button>
                 </div>
               ) : (
-                <div className="severity-list">
-                  <div className="sev-row">
-                    <span className="sev-badge high">High</span>
-                    <div className="sev-bar-track">
-                      <div
-                        className="sev-bar-fill high"
-                        style={{ width: `${totalFindings ? (totals.high / totalFindings) * 100 : 0}%` }}
-                      />
-                    </div>
-                    <strong className="sev-count">{totals.high}</strong>
-                  </div>
-                  <div className="sev-row">
-                    <span className="sev-badge medium">Medium</span>
-                    <div className="sev-bar-track">
-                      <div
-                        className="sev-bar-fill medium"
-                        style={{ width: `${totalFindings ? (totals.medium / totalFindings) * 100 : 0}%` }}
-                      />
-                    </div>
-                    <strong className="sev-count">{totals.medium}</strong>
-                  </div>
-                  <div className="sev-row">
-                    <span className="sev-badge low">Low / Info</span>
-                    <div className="sev-bar-track">
-                      <div
-                        className="sev-bar-fill low"
-                        style={{ width: `${totalFindings ? (totals.low / totalFindings) * 100 : 0}%` }}
-                      />
-                    </div>
-                    <strong className="sev-count">{totals.low}</strong>
-                  </div>
-                </div>
+                <VulnerabilityLineGraph
+                  history={history}
+                  totals={totals}
+                  totalFindings={totalFindings}
+                  onInspect={() => onNavigate('findings')}
+                />
               )}
             </div>
           </div>

@@ -50,7 +50,11 @@ const FAQS = [
   },
 ];
 
-export default function LandingHome({ onEnterApp }) {
+export default function LandingHome({
+  onEnterApp,
+  videoSrc = "/videos/threatlens-demo.mp4",
+  videoPoster = "",
+}) {
   const [slideIdx, setSlideIdx] = useState(0);
   const [testIdx, setTestIdx] = useState(0);
   const [openFaq, setOpenFaq] = useState(0);
@@ -101,26 +105,23 @@ export default function LandingHome({ onEnterApp }) {
         </div>
       </header>
 
-      {/* Block 1: Scanning & Evidence (Animated Stack Diagram) */}
+      {/* Block 1: Scanning & Evidence (Website Video) */}
       <section id="scanning" className="lh-section lh-hero">
         <div className="lh-container lh-grid-2">
-          <div className="lh-stack-anim">
-            <div className="lh-node lh-node-top lh-float-slow">
-              <span>MainApp.app</span>
-            </div>
-            <div className="lh-connector" />
-            <div className="lh-node lh-node-mid lh-pulse-border">
-              <span>:443/tcp</span>
-              <small>HTTPS / TLS</small>
-            </div>
-            <div className="lh-node-row">
-              <div className="lh-node lh-node-sub lh-float-delayed">
-                <span>WordPress</span>
-              </div>
-              <div className="lh-node lh-node-sub lh-float-slow">
-                <span>Apache</span>
-              </div>
-            </div>
+          <div className="lh-video-stage">
+            <video
+              className="lh-demo-video"
+              src={videoSrc}
+              poster={videoPoster || undefined}
+              controls
+              autoPlay
+              muted
+              loop
+              playsInline
+              preload="metadata"
+            >
+              Your browser does not support the video tag.
+            </video>
           </div>
 
           <div>

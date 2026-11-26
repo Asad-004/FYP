@@ -137,6 +137,30 @@
   margin-right: 6px;
 }
 
+/* Hero Demo Video Container */
+.lh-video-stage {
+  position: relative;
+  min-height: 290px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at center, rgba(245, 180, 0, 0.12), transparent 70%);
+  border: 1px solid #28282f;
+  border-radius: 14px;
+  padding: 10px;
+  overflow: hidden;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.35);
+}
+
+.lh-demo-video {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border-radius: 10px;
+  display: block;
+  object-fit: cover;
+  background: #0e0e11;
+}
+
 .lh-stack-anim,
 .lh-radar-stage,
 .lh-doc-stage {
@@ -468,5 +492,8 @@
   }
   .lh-faq-grid {
     grid-template-columns: 1fr;
+  }
+  .lh-video-stage {
+    min-height: 210px;
   }
 }
